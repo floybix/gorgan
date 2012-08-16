@@ -11,6 +11,38 @@
 (defn ff [body]
   (first (fixtureseq body)))
 
+;; TODO: need fn for point on edge of a shape at given angle
+;; TODO: maybe also a point furthest from a given other point
+
+(defn make-leg
+  [body pos side]
+  (let [z (side {:left -1, :right 1})
+        wpos (world-point body pos)
+        thigh (body! (body-def :position (map + wpos [z 0]))
+                     (fixture-def (box 1 0.1)))
+        calf (body! (body-def :position (world-point thigh [z -1]))
+                    (fixture-def (box 0.1 1)))
+        j1 (joint! (revolute-joint-def body thigh
+                                       wpos
+                                       :lower-angle (/ (- PI) 4)
+                                       :upper-angle (/ PI 4)
+                                       :enable-limit true
+                                       :enable-motor false
+                                       :motor-speed SPEED
+                                       :motor-torque 1000))
+        j2 (joint! (revolute-joint-def thigh calf
+                                       (world-point thigh [z 0])
+                                       :lower-angle (/ (- PI) 4)
+                                       :upper-angle (/ PI 4)
+                                       :enable-limit true
+                                       :enable-motor false
+                                       :motor-speed SPEED
+                                       :motor-torque 1000))]
+    {:thigh thigh
+     :calf calf
+     :j1 j1
+     :j2 j2}))
+
 (defn setup-world! []
   (create-world!)
   (let [ground (body! (body-def :type :static)
@@ -19,31 +51,9 @@
                       (fixture-def (edge [40 0] [50 20])))
         head (body! (body-def :position [0 3])
                     (fixture-def (circle 1) :density 5))
-        thigh (body! (body-def :position (world-point head [2 0]))
-                     (fixture-def (box 1 0.1)))
-        calf (body! (body-def :position (world-point thigh [1 -1]))
-                    (fixture-def (box 0.1 1) :friction 1))
-        j1 (joint! (revolute-joint-def head thigh
-                                       (world-point head [1 0])
-                                       :lower-angle (/ (- PI) 4)
-                                       :upper-angle (/ PI 4)
-                                       :enable-limit true
-                                       :enable-motor false
-                                       :motor-speed SPEED
-                                       :motor-torque 1000))
-        j2 (joint! (revolute-joint-def thigh calf
-                                       (world-point thigh [1 0])
-                                       :lower-angle (/ (- PI) 4)
-                                       :upper-angle (/ PI 4)
-                                       :enable-limit true
-                                       :enable-motor false
-                                       :motor-speed SPEED
-                                       :motor-torque 1000))]
-    (reset! it {:head head
-                :thigh thigh
-                :calf calf
-                :j1 j1
-                :j2 j2})
+        rleg (make-leg head [1 0] :right)
+        lleg (make-leg head [-1 0] :left)]
+    (reset! it {:rleg rleg :lleg lleg :head head})
     (reset! ground-body ground)))
 
 (defn joint-angle
@@ -51,16 +61,16 @@
   (.getJointAngle jt))
 
 (defn update-info-text []
-  (let [j1 (:j1 @it)
-        j2 (:j2 @it)]
-  (reset! info-text
-          (str "First movement experiment." "\n"
-               "j1 angle = " (format "%.2f" (.getJointAngle j1))
-               " speed = " (format "%.2f" (.getJointSpeed j1))
-               " torque = " (.getMotorTorque j1) "\n"
-               "j2 angle = " (format "%.2f" (.getJointAngle j2))
-               " speed = " (format "%.2f" (.getJointSpeed j2))
-               " torque = " (.getMotorTorque j2) "\n"))))
+  (let [j1 (:j1 (:rleg @it))
+        j2 (:j2 (:rleg @it))]
+    (reset! info-text
+            (str "First movement experiment." "\n"
+                 "j1 angle = " (format "%.2f" (.getJointAngle j1))
+                 " speed = " (format "%.2f" (.getJointSpeed j1))
+                 " torque = " (format "%.2f" (.getMotorTorque j1)) "\n"
+                 "j2 angle = " (format "%.2f" (.getJointAngle j2))
+                 " speed = " (format "%.2f" (.getJointSpeed j2))
+                 " torque = " (format "%.2f" (.getMotorTorque j2)) "\n"))))
 
 (defn setup []
   (setup-world!)
@@ -68,18 +78,19 @@
 
 (defn draw []
   (step! (/ 1 (quil/current-frame-rate)))
-  (let [j1 (:j1 @it)
-        j2 (:j2 @it)]
-    (.enableMotor j1 true)
-    (.enableMotor j2 true)
-    (if (> (joint-angle j2) (- (/ PI 4) 0.1))
-      (do
-        (.setMotorSpeed j1 (- SPEED))
-        (.setMotorSpeed j2 (- SPEED)))
-      (if (< (joint-angle j2) (+ (/ (- PI) 4) 0.1))
+  (doseq [leg [:rleg :lleg]]
+    (let [j1 (:j1 (leg @it))
+          j2 (:j2 (leg @it))]
+      (.enableMotor j1 true)
+      (.enableMotor j2 true)
+      (if (> (joint-angle j2) (- (/ PI 4) 0.1))
         (do
-          (.setMotorSpeed j1 SPEED)
-          (.setMotorSpeed j2 SPEED)))))
+          (.setMotorSpeed j1 (- SPEED))
+          (.setMotorSpeed j2 (- SPEED)))
+        (if (< (joint-angle j2) (+ (/ (- PI) 4) 0.1))
+          (do
+            (.setMotorSpeed j1 SPEED)
+            (.setMotorSpeed j2 SPEED))))))
   (update-info-text)  
   (draw-world))
 
