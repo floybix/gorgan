@@ -8,9 +8,6 @@
 
 (def SPEED (/ PI 4))
 
-(defn ff [body]
-  (first (fixtureseq body)))
-
 ;; TODO: need fn for point on edge of a shape at given angle
 ;; TODO: maybe also a point furthest from a given other point
 
@@ -18,26 +15,25 @@
   [body pos side]
   (let [z (side {:left -1, :right 1})
         wpos (world-point body pos)
-        thigh (body! (body-def :position (map + wpos [z 0]))
-                     (fixture-def (box 1 0.1)))
-        calf (body! (body-def :position (world-point thigh [z -1]))
-                    (fixture-def (box 0.1 1)))
-        j1 (joint! (revolute-joint-def body thigh
-                                       wpos
-                                       :lower-angle (/ (- PI) 4)
-                                       :upper-angle (/ PI 4)
-                                       :enable-limit true
-                                       :enable-motor false
-                                       :motor-speed SPEED
-                                       :motor-torque 1000))
-        j2 (joint! (revolute-joint-def thigh calf
-                                       (world-point thigh [z 0])
-                                       :lower-angle (/ (- PI) 4)
-                                       :upper-angle (/ PI 4)
-                                       :enable-limit true
-                                       :enable-motor false
-                                       :motor-speed SPEED
-                                       :motor-torque 1000))]
+        thigh (body! {:position (map + wpos [z 0])}
+                     {:shape (box 1 0.1)})
+        calf (body! {:position (world-point thigh [z -1])}
+                    {:shape (box 0.1 1)})
+        j1 (revolute-joint! body thigh wpos
+                            {:lower-angle (/ (- PI) 4)
+                             :upper-angle (/ PI 4)
+                             :enable-limit true
+                             :enable-motor false
+                             :motor-speed (* SPEED 1.25)
+                             :motor-torque 1000})
+        j2 (revolute-joint! thigh calf
+                            (world-point thigh [z 0])
+                            {:lower-angle (/ (- PI) 4)
+                             :upper-angle (/ PI 4)
+                             :enable-limit true
+                             :enable-motor false
+                             :motor-speed SPEED
+                             :motor-torque 1000})]
     {:thigh thigh
      :calf calf
      :j1 j1
@@ -45,12 +41,12 @@
 
 (defn setup-world! []
   (create-world!)
-  (let [ground (body! (body-def :type :static)
-                      (fixture-def (edge [-40 0] [40 0]))
-                      (fixture-def (edge [-40 0] [-50 20]))
-                      (fixture-def (edge [40 0] [50 20])))
-        head (body! (body-def :position [0 3])
-                    (fixture-def (circle 1) :density 5))
+  (let [ground (body! {:type :static}
+                      {:shape (edge [-40 0] [40 0])}
+                      {:shape (edge [-40 0] [-50 20])}
+                      {:shape (edge [40 0] [50 20])})
+        head (body! {:position [0 3]}
+                    {:shape (circle 1) :density 5})
         rleg (make-leg head [1 0] :right)
         lleg (make-leg head [-1 0] :left)]
     (reset! it {:rleg rleg :lleg lleg :head head})
