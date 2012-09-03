@@ -1,5 +1,6 @@
 (ns gorgan.core
-  (:use [cljbox2d core joints testbed])
+  (:use [cljbox2d core joints testbed]
+        [cljbox2d.vec2d :only [TWOPI PI]])
   (:require [quil.core :as quil]))
 
 (def it (atom {}))
@@ -8,32 +9,26 @@
 
 (def SPEED (/ PI 4))
 
-;; TODO: need fn for point on edge of a shape at given angle
-;; TODO: maybe also a point furthest from a given other point
 
 (defn make-leg
   [body pos side]
   (let [z (side {:left -1, :right 1})
-        wpos (world-point body pos)
+        wpos (position body pos)
         thigh (body! {:position (map + wpos [z 0])}
                      {:shape (box 1 0.1)})
-        calf (body! {:position (world-point thigh [z -1])}
+        calf (body! {:position (position thigh [z -1])}
                     {:shape (box 0.1 1)})
+        jt-opts {:lower-angle (/ (- PI) 4)
+                 :upper-angle (/ PI 4)
+                 :enable-limit true
+                 :enable-motor false
+                 :motor-speed SPEED
+                 :motor-torque 100}
         j1 (revolute-joint! body thigh wpos
-                            {:lower-angle (/ (- PI) 4)
-                             :upper-angle (/ PI 4)
-                             :enable-limit true
-                             :enable-motor false
-                             :motor-speed (* SPEED 1.25)
-                             :motor-torque 1000})
+                            jt-opts)
         j2 (revolute-joint! thigh calf
-                            (world-point thigh [z 0])
-                            {:lower-angle (/ (- PI) 4)
-                             :upper-angle (/ PI 4)
-                             :enable-limit true
-                             :enable-motor false
-                             :motor-speed SPEED
-                             :motor-torque 1000})]
+                            (position thigh [z 0])
+                            jt-opts)]
     {:thigh thigh
      :calf calf
      :j1 j1
@@ -52,43 +47,45 @@
     (reset! it {:rleg rleg :lleg lleg :head head})
     (reset! ground-body ground)))
 
-(defn joint-angle
-  [jt]
-  (.getJointAngle jt))
+(defn draw-info-text []
+  (let [{:keys [rleg lleg]} @it
+        r1 (:j1 rleg)
+        r2 (:j2 rleg)
+        l1 (:j1 lleg)
+        l2 (:j2 lleg)
+        fmt (fn [x] (format "%.2f" x))
+        j-info (fn [j nm]
+                 (str nm
+                      ": angle = " (fmt (joint-angle j))
+                      ", motor " (if (motor-enabled? j) "on" "off")
+                      ", mspeed = " (fmt (motor-speed j))
+                      ", mtorque = " (fmt (motor-torque j))))]
+    (quil/text-align :left)
+    (quil/text (str (j-info l1 "l1") "\n"
+                    (j-info l2 "l2") "\n"
+                    (j-info r1 "r1") "\n"
+                    (j-info r2 "r2"))
+               10 10)))
 
-(defn update-info-text []
-  (let [j1 (:j1 (:rleg @it))
-        j2 (:j2 (:rleg @it))]
-    (reset! info-text
-            (str "First movement experiment." "\n"
-                 "j1 angle = " (format "%.2f" (.getJointAngle j1))
-                 " speed = " (format "%.2f" (.getJointSpeed j1))
-                 " torque = " (format "%.2f" (.getMotorTorque j1)) "\n"
-                 "j2 angle = " (format "%.2f" (.getJointAngle j2))
-                 " speed = " (format "%.2f" (.getJointSpeed j2))
-                 " torque = " (format "%.2f" (.getMotorTorque j2)) "\n"))))
-
-(defn setup []
-  (setup-world!)
-  (update-info-text))
-
-(defn draw []
-  (step! (/ 1 (quil/current-frame-rate)))
+(defn my-step []
   (doseq [leg [:rleg :lleg]]
     (let [j1 (:j1 (leg @it))
           j2 (:j2 (leg @it))]
-      (.enableMotor j1 true)
-      (.enableMotor j2 true)
+      (enable-motor! j1 true)
+      (enable-motor! j2 true)
       (if (> (joint-angle j2) (- (/ PI 4) 0.1))
         (do
-          (.setMotorSpeed j1 (- SPEED))
-          (.setMotorSpeed j2 (- SPEED)))
+          (motor-speed! j1 (- SPEED))
+          (motor-speed! j2 (- SPEED)))
         (if (< (joint-angle j2) (+ (/ (- PI) 4) 0.1))
           (do
-            (.setMotorSpeed j1 SPEED)
-            (.setMotorSpeed j2 SPEED))))))
-  (update-info-text)  
-  (draw-world))
+            (motor-speed! j1 SPEED)
+            (motor-speed! j2 SPEED)))))))
+
+(defn setup []
+  (setup-world!)
+  (reset! step-fn my-step)
+  (reset! draw-more-fn draw-info-text))
 
 (defn -main
   "Run the sketch."
@@ -97,6 +94,7 @@
     :title "Gorgan"
     :setup setup
     :draw draw
+    :key-typed key-press
     :mouse-pressed mouse-pressed
     :mouse-released mouse-released
     :mouse-dragged mouse-dragged
