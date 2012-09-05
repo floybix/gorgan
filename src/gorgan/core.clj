@@ -1,86 +1,102 @@
 (ns gorgan.core
   (:use [cljbox2d core joints testbed]
-        [cljbox2d.vec2d :only [TWOPI PI]])
+        [cljbox2d.vec2d :only [TWOPI PI angle* angle-left?]])
   (:require [quil.core :as quil]))
 
 (def it (atom {}))
 
-(def walking (atom :right))
-
 (def SPEED (/ PI 4))
 
-
 (defn make-leg
-  [body pos side]
-  (let [z (side {:left -1, :right 1})
-        wpos (position body pos)
-        thigh (body! {:position (map + wpos [z 0])}
-                     {:shape (box 1 0.1)})
-        calf (body! {:position (position thigh [z -1])}
-                    {:shape (box 0.1 1)})
-        jt-opts {:lower-angle (/ (- PI) 4)
-                 :upper-angle (/ PI 4)
-                 :enable-limit true
-                 :enable-motor false
-                 :motor-speed SPEED
-                 :motor-torque 100}
-        j1 (revolute-joint! body thigh wpos
+  [body dir group-index]
+  (let [angle (angle* dir)
+        at (edge-point body angle)
+        thigh (body! {:position at}
+                     {:shape (rod [0 0] angle 3 0.1)
+                      :group-index group-index})
+        at-knee (edge-point thigh angle)
+        calf-angle (+ angle (* 0.75 PI
+                               (if (angle-left? angle) 1 -1)))
+        calf (body! {:position at-knee}
+                    {:shape (rod [0 0] calf-angle 5 0.1)
+                     :group-index group-index})
+        jt-opts {:enable-motor true
+                 :motor-speed 0
+                 :max-motor-torque 1000}
+        j0 (revolute-joint! body thigh at
                             jt-opts)
-        j2 (revolute-joint! thigh calf
-                            (position thigh [z 0])
+        j1 (revolute-joint! thigh calf at-knee
                             jt-opts)]
-    {:thigh thigh
-     :calf calf
-     :j1 j1
-     :j2 j2}))
+    {:bodies [thigh calf]
+     :joints [j0 j1]}))
+
+(defn make-2ped
+  [position group-index]
+  (let [head (body! {:position position}
+                    {:shape (circle 1)
+                     :group-index group-index})
+        rleg (make-leg head :top-right group-index)
+        lleg (make-leg head :top-left group-index)]
+    {:right rleg :left lleg :head head}))
 
 (defn setup-world! []
   (create-world!)
   (let [ground (body! {:type :static}
                       {:shape (edge [-40 0] [40 0])}
                       {:shape (edge [-40 0] [-50 20])}
-                      {:shape (edge [40 0] [50 20])})
-        head (body! {:position [0 3]}
-                    {:shape (circle 1) :density 5})
-        rleg (make-leg head [1 0] :right)
-        lleg (make-leg head [-1 0] :left)]
-    (reset! it {:rleg rleg :lleg lleg :head head})
+                      {:shape (edge [40 0] [45 5])}
+                      {:shape (edge [45 5] [60 5])}
+                      {:shape (edge [60 5] [65 25])})
+        ped (make-2ped [0 3] -2)]
+    (reset! it ped)
     (reset! ground-body ground)))
 
 (defn draw-info-text []
-  (let [{:keys [rleg lleg]} @it
-        r1 (:j1 rleg)
-        r2 (:j2 rleg)
-        l1 (:j1 lleg)
-        l2 (:j2 lleg)
+  (let [{{[l0 l1] :joints} :left
+         {[r0 r1] :joints} :right} @it
         fmt (fn [x] (format "%.2f" x))
+        fmt-ang (fn [x] (str (fmt (/ x PI)) "pi"))
         j-info (fn [j nm]
                  (str nm
-                      ": angle = " (fmt (joint-angle j))
+                      ": angle = " (fmt-ang (joint-angle j))
                       ", motor " (if (motor-enabled? j) "on" "off")
-                      ", mspeed = " (fmt (motor-speed j))
+                      ", mspeed = " (fmt-ang (motor-speed j))
                       ", mtorque = " (fmt (motor-torque j))))]
+    (quil/fill 255)
     (quil/text-align :left)
-    (quil/text (str (j-info l1 "l1") "\n"
-                    (j-info l2 "l2") "\n"
-                    (j-info r1 "r1") "\n"
-                    (j-info r2 "r2"))
+    (quil/text (str (j-info l0 "l0") "\n"
+                    (j-info l1 "l1") "\n"
+                    (j-info r0 "r0") "\n"
+                    (j-info r1 "r1"))
                10 10)))
 
+(defn my-key-press []
+  (let [{{[l0 l1] :joints} :left
+         {[r0 r1] :joints} :right} @it
+        delta (/ PI 4)]
+    (case (quil/raw-key)
+      \q (motor-speed! l1 (+ (motor-speed l1) delta))
+      \w (motor-speed! l0 (+ (motor-speed l0) delta))
+      \e (motor-speed! r0 (+ (motor-speed r0) delta))
+      \r (motor-speed! r1 (+ (motor-speed r1) delta))
+      
+      \a (enable-motor! l1 (not (motor-enabled? l1)))
+      \s (enable-motor! l0 (not (motor-enabled? l0)))
+      \d (enable-motor! r0 (not (motor-enabled? r0)))
+      \f (enable-motor! r1 (not (motor-enabled? r1)))
+
+      \z (motor-speed! l1 (- (motor-speed l1) delta))
+      \x (motor-speed! l0 (- (motor-speed l0) delta))
+      \c (motor-speed! r0 (- (motor-speed r0) delta))
+      \v (motor-speed! r1 (- (motor-speed r1) delta))
+
+      ;; otherwise pass on to testbed
+      (key-press))))
+
 (defn my-step []
-  (doseq [leg [:rleg :lleg]]
-    (let [j1 (:j1 (leg @it))
-          j2 (:j2 (leg @it))]
-      (enable-motor! j1 true)
-      (enable-motor! j2 true)
-      (if (> (joint-angle j2) (- (/ PI 4) 0.1))
-        (do
-          (motor-speed! j1 (- SPEED))
-          (motor-speed! j2 (- SPEED)))
-        (if (< (joint-angle j2) (+ (/ (- PI) 4) 0.1))
-          (do
-            (motor-speed! j1 SPEED)
-            (motor-speed! j2 SPEED)))))))
+  (let [{{[l0 l1] :joints} :left
+         {[r0 r1] :joints} :right} @it]
+    ))
 
 (defn setup []
   (setup-world!)
@@ -94,7 +110,7 @@
     :title "Gorgan"
     :setup setup
     :draw draw
-    :key-typed key-press
+    :key-typed my-key-press
     :mouse-pressed mouse-pressed
     :mouse-released mouse-released
     :mouse-dragged mouse-dragged
