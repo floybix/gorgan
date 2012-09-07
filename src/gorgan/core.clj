@@ -1,11 +1,234 @@
 (ns gorgan.core
   (:use [cljbox2d core joints testbed]
-        [cljbox2d.vec2d :only [TWOPI PI angle* angle-left?]])
+        [cljbox2d.vec2d :only [TWOPI PI in-pi-pi
+                               angle* angle-left?]])
   (:require [quil.core :as quil]))
 
-(def it (atom {}))
+(def ^:dynamic *it* nil)
 
-(def SPEED (/ PI 4))
+(def current-decision-path (atom nil))
+(def entered-decision (atom 0))
+
+
+;; ## DSL for movement scheme
+
+;; ### grammar of expressions safe for use in tests (no side effects!)
+
+;; not used currently
+
+(def pure-fn-types
+  {'x-velocity [:pos-num [:pos-num]]
+   'head-angle [:num []]
+   'time-in-state [:pos-num []]
+   'food-left? [:logical [:pos-num]]
+   'food-within? [:logical [:pos-num]]
+   'j-speed [:num [:joint]]
+   'j-angle [:num [:joint]]
+   'j [:joint [:side :int]] ; only 0 or 1 for now
+   '< [:logical [:num :num]]
+   '> [:logical [:num :num]]
+   'pos? [:logical [:num]]
+   'neg? [:logical [:num]]
+   'zero? [:logical [:num]]
+   'not [:logical [:logical]]
+   'and [:logical [:logical :logical]]
+   'or [:logical [:logical :logical]]
+   'min [:num [:num :num]]
+   'max [:num [:num :num]]
+   '- [:num [:num :num]]
+   '+ [:num [:num :num]]
+   '* [:num [:num :num]]
+   '/ [:num [:num :num]]
+   })
+
+(def effect-fn-types
+  {'j-off! [:joint]
+   'j-on! [:joint]
+   'j-speed! [:joint :num]
+   'j-angle! [:joint :num]
+   'j-maxtorque! [:joint :pos-num]
+   })
+
+(defn x-velocity
+ "horizontal velocity of head integrated over some time span"
+ [tspan]
+ )
+
+(defn head-angle
+ []
+ )
+
+(defn time-in-state
+ "time since we entered the currently selected node in the movement
+  scheme tree"
+ []
+ (- @world-time @entered-decision))
+
+(defn food-within?
+  "queries for food within given distance left or right.
+   vertical range is the same as ped height."
+  ([dist]
+     (food-within? dist dist))
+  ([ldist rdist]
+     ;; returns a vector of fixtures:
+     ;; TODO: test for food
+     (let [[x y] (position (:head *it*))
+           fxx (query-aabb (aabb [(- x ldist) y]
+                                 [(+ x rdist) 0]))]
+       (some #(:is-food? (user-data %)) fxx))))
+
+(defn food-left?
+  "queries for food within given distance to left.
+   vertical range is the same as ped height."
+  [dist]
+  (food-within? dist -0.1))
+
+(defn food-right?
+  "queries for food within given distance to right.
+   vertical range is the same as ped height."
+  [dist]
+  (food-within? -0.1 dist))
+
+(defn j
+  "selects a joint or multiple joints (a sequence)"
+  ([]
+     (concat (j :left) (j :right)))
+  ([side]
+     (:joints (get *it* side)))
+  ([side index]
+     (nth (j side) index)))
+
+
+;; queries on collections of joints: should we
+;;   a) not allow
+;;   b) return a sequence of speeds
+;;   c) return average of speeds?
+
+(defn j-speed
+  "target motor speed for joint."
+  [jt]
+  (motor-speed jt))
+
+(defn j-angle
+  [jt]
+  (joint-angle jt))
+
+(defn j-world-angle
+  [jt]
+  (angle (body-b jt)))
+
+(defn j-off!
+  [jt]
+  (if (coll? jt)
+    (dorun (map j-off! jt))
+    (enable-motor! jt false)))
+
+(defn j-on!
+  [jt]
+  (if (coll? jt)
+    (dorun (map j-on! jt))
+    (enable-motor! jt true)))
+
+(defn j-speed!
+  [jt speed]
+  (if (coll? jt)
+    (dorun (map #(j-speed! % speed) jt))
+    (do
+      (enable-motor! jt true)
+      (motor-speed! jt speed))))
+
+(defn j-angle!
+  "set speed according to difference from target angle relative to
+   attached body (??)" ;; TODO think about this
+  [jt angle]
+  (if (coll? jt)
+    (dorun (map #(j-angle! % angle) jt))
+    (do
+      (enable-motor! jt true)
+      (let [ang-diff (in-pi-pi (- angle (joint-angle jt)))]
+        (motor-speed! jt (* 3 ang-diff))))))
+
+(defn j-world-angle!
+  "set speed according to difference from target world angle (of
+   attached outer body)"
+  [jt angle]
+  (if (coll? jt)
+    (dorun (map #(j-world-angle! % angle) jt))
+    (do
+      (enable-motor! jt true)
+      (let [ang-diff (in-pi-pi (- angle (angle (body-b jt))))]
+        (motor-speed! jt (* 3 ang-diff))))))
+
+(defn j-maxtorque!
+  [jt torque]
+  (if (coll? jt)
+    (dorun (map #(j-maxtorque! % torque) jt))
+    (max-motor-torque! jt torque)))
+
+(defn decide!
+  ([scheme]
+     (decide! scheme []))
+  ([scheme path-taken]
+     (binding [*ns* (find-ns 'gorgan.core)]
+       (when-let [actions (:do scheme)]
+         (eval actions))
+       (if-let [test-form (:test scheme)]
+         (let [result (eval test-form)
+               next-scheme (if result
+                             (:when-true scheme)
+                             (:otherwise scheme))]
+           (if next-scheme
+             (decide! next-scheme (conj path-taken result))
+             path-taken))
+         path-taken))))
+
+(def first-basic-scheme
+  {
+   :test '(food-within? 1)
+   :when-true
+   {
+    :do ['(j-off! (j))]
+    :test '(> (time-in-state) 3)
+    :when-true
+    {
+     :do ['(j-speed! (j :left 1) 2)]
+     }
+    }
+   :otherwise
+   {
+    :do ['(j-on! (j))]
+    :test '(food-left? 10)
+    :when-true
+    {
+     :do ['(j-speed! (j :left 1) 1)
+          '(j-speed! (j :right 1) 1)]
+     }
+    :otherwise
+    {
+     :test '(food-right? 10)
+     :when-true
+     {
+      :do ['(j-speed! (j :left 1) -1)
+           '(j-speed! (j :right 1) -1)]
+      }
+     :otherwise
+     {
+      :do ['(j-speed! (j :left 1) 0)
+           '(j-speed! (j :right 1) 0)]
+      }
+     }
+    }
+   }
+  )
+
+(defn make-food
+  "Creates and returns a food particle.
+   :user-data of the fixture is a map `{:is-food? true}`"
+  [position]
+  (body! {:position position}
+         {:shape (polygon [[0 0.6] [-0.25 0] [0.25 0]])
+          :restitution 0 :friction 0.8
+          :user-data {:is-food? true}}))
 
 (defn make-leg
   [body dir group-index]
@@ -47,13 +270,15 @@
                       {:shape (edge [40 0] [45 5])}
                       {:shape (edge [45 5] [60 5])}
                       {:shape (edge [60 5] [65 25])})
+        allfood (doall (for [x (range -40 40 5)]
+                         (make-food [x 0.6])))
         ped (make-2ped [0 3] -2)]
-    (reset! it ped)
+    (alter-var-root (var *it*) (fn [_] ped))
     (reset! ground-body ground)))
 
 (defn draw-info-text []
   (let [{{[l0 l1] :joints} :left
-         {[r0 r1] :joints} :right} @it
+         {[r0 r1] :joints} :right} *it*
         fmt (fn [x] (format "%.2f" x))
         fmt-ang (fn [x] (str (fmt (/ x PI)) "pi"))
         j-info (fn [j nm]
@@ -72,7 +297,7 @@
 
 (defn my-key-press []
   (let [{{[l0 l1] :joints} :left
-         {[r0 r1] :joints} :right} @it
+         {[r0 r1] :joints} :right} *it*
         delta (/ PI 4)]
     (case (quil/raw-key)
       \q (motor-speed! l1 (+ (motor-speed l1) delta))
@@ -94,8 +319,11 @@
       (key-press))))
 
 (defn my-step []
-  (let [{{[l0 l1] :joints} :left
-         {[r0 r1] :joints} :right} @it]
+  (let [path (decide! first-basic-scheme)]
+    (when-not (= path @current-decision-path)
+      (println "new decision: " path)
+      (reset! current-decision-path path)
+      (reset! entered-decision @world-time))
     ))
 
 (defn setup []
