@@ -1,10 +1,19 @@
 
+* creature movement strategies
+  * debug/insight:
+    * print sequence of tests and results when decision changes (DONE)
+    * press \? to show API state
+  * decision tree (DONE)
+    * effects at each node, not just leaves
+  * maybe better: sets of conditions triggering "productions"
+    * like SOAR
+
 * energy
   * food particles
     * food -> mass (density) -> energy
     * touch food with head to eat
   * account for energy use
-    * depletes reserves
+    * depletes reserves DONE
     * physiological max energy use rate?
       * over some time span
       * depends on food type?
@@ -27,12 +36,9 @@
     * several ranges / directions
   * sensors/raycast?
 
-* creature movement strategies
-  * decision tree?
-    * effects at each node, not just leaves
-
 * evolution
   * crossover and mutation
+    * mutation rules evolve?
   * competing individuals, or independent (islands)?
 
 * initially just one body structure

@@ -19,7 +19,44 @@
 ;; a vector corresponding to last-decisions
 (def entered-decisions (atom []))
 
-(def pos-history (atom []))
+;; @pos-history has a staggered series of queues.
+;; we keep one second (/ 1 *timestep*) values in :steps
+;; every 1 second the oldest :steps is added to :secs
+;; we keep 60 seconds in :secs ... etc
+(def pos-history (atom nil))
+
+(defn reset-pos-history!
+  [pos]
+  (reset! pos-history
+          (let [q (clojure.lang.PersistentQueue/EMPTY)]
+            {:steps (into q (repeat (/ 1 *timestep*) pos))
+             :secs (into q (repeat 60 pos))
+             :mins (conj q pos)
+             :last-sec @world-time
+             :last-min @world-time})))
+
+(defn pos-at-time-ago
+  [tspan]
+  (let [{:keys [steps secs mins]} @pos-history]
+    (cond
+     (< tspan 1) (nth steps (int (/ tspan *timestep*)))
+     (< tspan 60) (nth secs (dec (int tspan)))
+     :else (nth mins (dec (min (count mins) (int (/ tspan 60))))))))
+
+(defn pos-history-step!
+  [pos]
+  (swap! pos-history
+         (fn [{:keys [steps secs mins last-sec last-min], :as m}]
+           (let [next-min? (> @world-time (+ last-sec 60))
+                 next-sec? (> @world-time (+ last-sec 1))]
+             (merge m
+                    {:steps (conj (pop steps) pos)}
+                    (when next-min?
+                      {:mins (conj mins (peek secs))
+                       :last-min @world-time})
+                    (when next-sec?
+                      {:secs (conj (pop secs) (peek steps))
+                       :last-sec @world-time}))))))
 
 (def foodlist (atom []))
 
@@ -32,15 +69,19 @@
 ;; not used currently
 
 (def pure-fn-types
-  {'x-velocity [:pos-num [:pos-num]]
+  {'#(@energy) [:num []]
+   'x-velocity [:pos-num [:pos-num]]
+   'y-velocity [:pos-num [:pos-num]]
    'head-angle [:num []]
    'time-in-state [:pos-num []]
-   'food-left? [:logical [:pos-num]]
-   'food-within? [:logical [:pos-num]]
+   'food-left [:int [:pos-num]]
+   'food-right [:int [:pos-num]]
+   'food-within [:int [:pos-num]]
    'j [:joint [:side :int]] ; only 0 or 1 for now
    'on-ground? [:logical [:joint]]  ;; TODO try this!
    'j-speed [:num [:joint]]
    'j-angle [:num [:joint]]
+   'leg-offset-x [:num [:joint]]
    '< [:logical [:num :num]]
    '> [:logical [:num :num]]
    'pos? [:logical [:num]]
@@ -82,16 +123,19 @@
   [x abs-max]
   (* (max (abs x) abs-max) (if (pos? x) 1 -1)))
 
+;; TODO: should these divide by tspan?
+
 (defn x-velocity
-  "horizontal velocity of head integrated over some time span
-   TODO: aggregate / sample the data back in time"
+  "Horizontal velocity of head integrated over some time span."
  [tspan]
- (let [tspan-ok (min tspan @world-time)
-       step (/ 1 30.0)
-       steps-ago (long (/ (- @world-time tspan) step))
-       n (dec (count @pos-history))]
-   (- (nth @pos-history n)
-      (nth @pos-history (- n steps-ago)))))
+ (- (first (position (:head *it*)))
+    (first (pos-at-time-ago tspan))))
+
+(defn y-velocity
+  "Vertical velocity of head integrated over some time span."
+ [tspan]
+ (- (second (position (:head *it*)))
+    (second (pos-at-time-ago tspan))))
 
 (defn head-angle
   []
@@ -112,30 +156,29 @@
        (- @world-time (nth @entered-decisions (dec depth)))
        0.0))))
 
-(defn food-within?
-  "queries for food within given distance left or right.
-   vertical range is the same as ped height."
+(defn food-within
+  "Counts food particles within given distance left or right.
+   Vertical range is the same as ped height."
   ([dist]
-     (food-within? dist dist))
+     (food-within dist dist))
   ([ldist rdist]
-     ;; returns a vector of fixtures:
-     ;; TODO: test for food
      (let [[x y] (position (:head *it*))
+           ;; returns a vector of fixtures:
            fxx (query-aabb (aabb [(- x ldist) y]
                                  [(+ x rdist) 0]))]
-       (some #(:is-food? (user-data %)) fxx))))
+       (count (filter #(:is-food? (user-data %)) fxx)))))
 
-(defn food-left?
-  "queries for food within given distance to left.
-   vertical range is the same as ped height."
+(defn food-left
+  "Counts food particles within given distance to left.
+   Vertical range is the same as ped height."
   [dist]
-  (food-within? dist -0.1))
+  (food-within dist -0.1))
 
-(defn food-right?
-  "queries for food within given distance to right.
-   vertical range is the same as ped height."
+(defn food-right
+  "Counts food particles within given distance to right.
+   Vertical range is the same as ped height."
   [dist]
-  (food-within? -0.1 dist))
+  (food-within -0.1 dist))
 
 (defn j
   "selects a joint or multiple joints (a sequence)"
@@ -156,8 +199,8 @@
   "tests whether a leg (extending out from given joint) is contacting
    the ground."
   [jt]
-  (let [s (contacting (body-b jt))]
-    (s @ground-body)))
+  (let [cset (contacting (body-b jt))]
+    (cset @ground-body)))
 
 (defn j-speed
   "target motor speed for joint."
@@ -237,17 +280,26 @@
          (let [result (boolean (eval test-form))
                next-scheme (if result
                              (:when-true scheme)
-                             (:otherwise scheme))]
-           ;;(when *debug*
-           ;;  (println "DEBUG" path "TEST" test-form "RETURNED" result))
+                             (:when-false scheme))]
            (if next-scheme
              (decide! next-scheme (conj path result))
              path))
          path))))
 
+(defn path-of-tests
+  [scheme path]
+  (loop [s scheme
+         p path
+         tests []]
+    (if s
+      (let [res (first path)
+            next-s (if res (:when-true s) (:when-false s))]
+        (recur next-s (next path) (conj tests (:test s))))
+      tests)))
+
 (def first-basic-scheme
   {
-   :test '(food-within? 1)
+   :test '(> (food-within 1) 0)
    :when-true
    {
     :do ['(j-off! (j))]
@@ -257,11 +309,11 @@
      :do ['(j-speed! (j :left) 3)]
      }
     }
-   :otherwise
+   :when-false
    {
     :do ['(j-world-angle! (j :left 1) 0 5)
          '(j-world-angle! (j :right 1) 0 5)]
-    :test '(food-left? 10)
+    :test '(> (food-left 10) 0)
     :when-true
     {
      :do ['(j-speed! (j :left 0) 2)
@@ -273,9 +325,9 @@
            '(j-speed! (j :right 1) 2)]
       }
      }
-    :otherwise
+    :when-false
     {
-     :test '(food-right? 10)
+     :test '(> (food-right 10) 0)
      :when-true
      {
       :do ['(j-speed! (j :left 0) -2)
@@ -287,7 +339,7 @@
             '(j-speed! (j :right 1) -5)]
        }
       }
-     :otherwise
+     :when-false
      {
       :do ['(j-world-angle! (j :left 0) 0 2)
            '(j-world-angle! (j :right 0) 0 2)]
@@ -307,11 +359,11 @@
   "Creates and returns a food particle.
    :user-data of the fixture is a map `{:is-food? true}`
    :user-data of the body is also a map `{:is-food? true}"
-  [position]
+  [position joules]
   (body! {:position position
-          :user-data {:is-food? true}}
+          :user-data {:is-food? true, :joules joules}}
          {:shape (polygon [[0 0.6] [-0.25 0] [0.25 0]])
-          :restitution 0 :friction 0.8
+          :density 5 :restitution 0 :friction 0.8
           :user-data {:is-food? true}}))
 
 (defn make-leg
@@ -346,20 +398,38 @@
         lleg (make-leg head :top-left group-index)]
     {:right rleg :left lleg :head head}))
 
+(defn poly-edges
+  [vertices attrs]
+  (for [[v0 v1] (partition 2 1 vertices)]
+    (merge {:shape (edge v0 v1)} attrs)))
+
 (defn setup-world! []
   (create-world!)
-  (let [ground (body! {:type :static}
-                      {:shape (edge [-40 0] [40 0])}
-                      {:shape (edge [-40 0] [-50 20])}
-                      {:shape (edge [40 0] [45 5])}
-                      {:shape (edge [45 5] [60 5])}
-                      {:shape (edge [60 5] [65 25])})
-        allfood (doall (for [x (range -40 40 5)]
-                         (make-food [x 0.6])))
+  (let [ground (apply body! {:type :static}
+                      (poly-edges [[-100 35]
+                                   [-90 5]
+                                   [-70 5]
+                                   [-65 10]
+                                   [-62 12]
+                                   [-60 10]
+                                   [-40 0]
+                                   [10 0]
+                                   [10.5 1]
+                                   [10.8 0]
+                                   [30 0]
+                                   [35 5]
+                                   [50 5]
+                                   [60 0]
+                                   [62 0]
+                                   [63 1]
+                                   [65 25]]
+                                  {:friction 1}))
+        allfood (doall (for [x (range -90 60 8)]
+                         (make-food [x 12] 50)))
         ped (make-2ped [0 3] -2)]
     (alter-var-root (var *it*) (fn [_] ped))
-    (reset! energy 1000)
-    (reset! pos-history (vector-of :float))
+    (reset! energy 500)
+    (reset-pos-history! (position (:head *it*)))
     (reset! foodlist allfood)
     (reset! ground-body ground)))
 
@@ -413,31 +483,37 @@
       (key-press))))
 
 (defn my-step []
-  ;; TODO: we need to know the time step to look this up!
-  (when-let [x (first (position (:head *it*)))]
-    (swap! pos-history conj x))
+  (pos-history-step! (position (:head *it*)))
   ;; Work(joules) = torque * rotation-angle
-  ;; note joules/seconds = watts
+  ;; note joules/second = watts
   (let [each-power (map power-watts (j))
-        dt (/ 1 30.0)
-        joules (* (reduce + each-power) dt)]
+        joules (* (reduce + each-power) *timestep*)]
     (swap! energy - joules))
   (let [path (decide! first-basic-scheme)]
     (when-not (= path @last-decisions)
-      (println (format "%.2f" @world-time)
-               "new decision: " path)
+      (when *debug*
+        (println (format "@%.1f" @world-time)
+                 "new decision: " path)
+        (let [tests (path-of-tests first-basic-scheme path)
+              nt (count tests)]
+          (doseq [[i tst res] (map vector (range nt) tests path)]
+            (println (apply str (repeat (* i 2) \ ))
+                     (if res "T" "F") ":"
+                     tst))))
       (let [n-same (count (take-while true? (map = path @last-decisions)))
             n-more (- (count path) n-same)]
         (reset! last-decisions path)
         (swap! entered-decisions
                (fn [this] (concat (take n-same this)
-                                  (repeat n-more @world-time))))
-        (println "n-same" n-same "n-more" n-more "entered decisions" @entered-decisions))))
-  (doseq [other (contacting (:head *it*))]
-    (when (:is-food? (user-data other))
+                                  (repeat n-more @world-time)))))))
+  (doseq [other (contacting (:head *it*))
+          :let [info (user-data other)]]
+    (when (:is-food? info)
+      (swap! energy + (:joules info))
       (destroy! other))))
 
 (defn setup []
+  (quil/frame-rate (/ 1 *timestep*))
   (setup-world!)
   (reset! step-fn my-step)
   (reset! draw-more-fn draw-info-text))
@@ -453,4 +529,4 @@
     :mouse-pressed mouse-pressed
     :mouse-released mouse-released
     :mouse-dragged mouse-dragged
-    :size [600 500]))
+    :size [1200 800]))
