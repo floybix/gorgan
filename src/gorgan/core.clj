@@ -4,11 +4,26 @@
                                angle* angle-left?]])
   (:require [quil.core :as quil]))
 
-(def ^:dynamic *it* nil)
+;; a creature
+(def ^:dynamic *it*)
 
-(def current-decision-path (atom nil))
-(def entered-decision (atom 0))
+;; bound as context within function (decide!)
+(def ^:dynamic *decision-path*)
 
+;; TODO these should be nested in *it* :
+
+;; energy reserves in joules
+(def energy (atom nil))
+
+(def last-decisions (atom []))
+;; a vector corresponding to last-decisions
+(def entered-decisions (atom []))
+
+(def pos-history (atom []))
+
+(def foodlist (atom []))
+
+(def ^:dynamic *debug* true)
 
 ;; ## DSL for movement scheme
 
@@ -22,9 +37,10 @@
    'time-in-state [:pos-num []]
    'food-left? [:logical [:pos-num]]
    'food-within? [:logical [:pos-num]]
+   'j [:joint [:side :int]] ; only 0 or 1 for now
+   'on-ground? [:logical [:joint]]  ;; TODO try this!
    'j-speed [:num [:joint]]
    'j-angle [:num [:joint]]
-   'j [:joint [:side :int]] ; only 0 or 1 for now
    '< [:logical [:num :num]]
    '> [:logical [:num :num]]
    'pos? [:logical [:num]]
@@ -35,10 +51,14 @@
    'or [:logical [:logical :logical]]
    'min [:num [:num :num]]
    'max [:num [:num :num]]
+   'abs [:pos-num [:num :num]]
+   'min-abs-limit [:num [:num :pos-num]]
+   'max-abs-limit [:num [:num :pos-num]]
    '- [:num [:num :num]]
    '+ [:num [:num :num]]
    '* [:num [:num :num]]
    '/ [:num [:num :num]]
+   'if [:num [:logical :num :num]] ;; ??? rely on :test?
    })
 
 (def effect-fn-types
@@ -46,23 +66,51 @@
    'j-on! [:joint]
    'j-speed! [:joint :num]
    'j-angle! [:joint :num]
+   'j-world-angle! [:joint :num]
    'j-maxtorque! [:joint :pos-num]
    })
 
+(defn abs
+  [x]
+  (if (pos? x) x (- x)))
+
+(defn min-abs-limit
+  [x abs-min]
+  (* (min (abs x) abs-min) (if (pos? x) 1 -1)))
+
+(defn max-abs-limit
+  [x abs-max]
+  (* (max (abs x) abs-max) (if (pos? x) 1 -1)))
+
 (defn x-velocity
- "horizontal velocity of head integrated over some time span"
+  "horizontal velocity of head integrated over some time span
+   TODO: aggregate / sample the data back in time"
  [tspan]
- )
+ (let [tspan-ok (min tspan @world-time)
+       step (/ 1 30.0)
+       steps-ago (long (/ (- @world-time tspan) step))
+       n (dec (count @pos-history))]
+   (- (nth @pos-history n)
+      (nth @pos-history (- n steps-ago)))))
 
 (defn head-angle
- []
- )
+  []
+  (angle (:head *it*)))
 
 (defn time-in-state
- "time since we entered the currently selected node in the movement
-  scheme tree"
+ "Time since last deviation from the current node in the movement
+  scheme tree. Depends on (and detects) the node from which it was
+  called. Note that the final decision node may change without
+  deviation from an intermediate decision node. Consequently the
+  top-level node can never be deviated from, and its time-in-state is
+  never reset."
  []
- (- @world-time @entered-decision))
+ (if (empty? *decision-path*)
+   @world-time
+   (let [depth (count *decision-path*)]
+     (if (= *decision-path* (take depth @last-decisions))
+       (- @world-time (nth @entered-decisions (dec depth)))
+       0.0))))
 
 (defn food-within?
   "queries for food within given distance left or right.
@@ -104,6 +152,13 @@
 ;;   b) return a sequence of speeds
 ;;   c) return average of speeds?
 
+(defn on-ground?
+  "tests whether a leg (extending out from given joint) is contacting
+   the ground."
+  [jt]
+  (let [s (contacting (body-b jt))]
+    (s @ground-body)))
+
 (defn j-speed
   "target motor speed for joint."
   [jt]
@@ -116,6 +171,11 @@
 (defn j-world-angle
   [jt]
   (angle (body-b jt)))
+
+(defn leg-offset-x
+  [jt]
+  (- (first (position (body-b jt)))
+     (first (position (:head *it*)))))
 
 (defn j-off!
   [jt]
@@ -140,24 +200,24 @@
 (defn j-angle!
   "set speed according to difference from target angle relative to
    attached body (??)" ;; TODO think about this
-  [jt angle]
+  [jt ang]
   (if (coll? jt)
-    (dorun (map #(j-angle! % angle) jt))
+    (dorun (map #(j-angle! % ang) jt))
     (do
       (enable-motor! jt true)
-      (let [ang-diff (in-pi-pi (- angle (joint-angle jt)))]
+      (let [ang-diff (in-pi-pi (- ang (joint-angle jt)))]
         (motor-speed! jt (* 3 ang-diff))))))
 
 (defn j-world-angle!
   "set speed according to difference from target world angle (of
    attached outer body)"
-  [jt angle]
+  [jt ang speed-factor]
   (if (coll? jt)
-    (dorun (map #(j-world-angle! % angle) jt))
+    (dorun (map #(j-world-angle! % ang) jt))
     (do
       (enable-motor! jt true)
-      (let [ang-diff (in-pi-pi (- angle (angle (body-b jt))))]
-        (motor-speed! jt (* 3 ang-diff))))))
+      (let [ang-diff (in-pi-pi (- ang (angle (body-b jt))))]
+        (motor-speed! jt (* speed-factor ang-diff))))))
 
 (defn j-maxtorque!
   [jt torque]
@@ -168,19 +228,22 @@
 (defn decide!
   ([scheme]
      (decide! scheme []))
-  ([scheme path-taken]
-     (binding [*ns* (find-ns 'gorgan.core)]
+  ([scheme path]
+     (binding [*ns* (find-ns 'gorgan.core)
+               *decision-path* path]
        (when-let [actions (:do scheme)]
          (eval actions))
        (if-let [test-form (:test scheme)]
-         (let [result (eval test-form)
+         (let [result (boolean (eval test-form))
                next-scheme (if result
                              (:when-true scheme)
                              (:otherwise scheme))]
+           ;;(when *debug*
+           ;;  (println "DEBUG" path "TEST" test-form "RETURNED" result))
            (if next-scheme
-             (decide! next-scheme (conj path-taken result))
-             path-taken))
-         path-taken))))
+             (decide! next-scheme (conj path result))
+             path))
+         path))))
 
 (def first-basic-scheme
   {
@@ -191,30 +254,49 @@
     :test '(> (time-in-state) 3)
     :when-true
     {
-     :do ['(j-speed! (j :left 1) 2)]
+     :do ['(j-speed! (j :left) 3)]
      }
     }
    :otherwise
    {
-    :do ['(j-on! (j))]
+    :do ['(j-world-angle! (j :left 1) 0 5)
+         '(j-world-angle! (j :right 1) 0 5)]
     :test '(food-left? 10)
     :when-true
     {
-     :do ['(j-speed! (j :left 1) 1)
-          '(j-speed! (j :right 1) 1)]
+     :do ['(j-speed! (j :left 0) 2)
+          '(j-speed! (j :right 0) 2)]
+     :test '(> (time-in-state) 5)
+     :when-true
+     {
+      :do ['(j-speed! (j :left 1) 2)
+           '(j-speed! (j :right 1) 2)]
+      }
      }
     :otherwise
     {
      :test '(food-right? 10)
      :when-true
      {
-      :do ['(j-speed! (j :left 1) -1)
-           '(j-speed! (j :right 1) -1)]
+      :do ['(j-speed! (j :left 0) -2)
+           '(j-speed! (j :right 0) -2)]
+      :test '(> (time-in-state) 5)
+      :when-true
+      {
+       :do ['(j-speed! (j :left 1) -5)
+            '(j-speed! (j :right 1) -5)]
+       }
       }
      :otherwise
      {
-      :do ['(j-speed! (j :left 1) 0)
-           '(j-speed! (j :right 1) 0)]
+      :do ['(j-world-angle! (j :left 0) 0 2)
+           '(j-world-angle! (j :right 0) 0 2)]
+      :test '(> (time-in-state) 2)
+      :when-true
+      {
+       :do ['(j-speed! (j :left 0) (min-abs-limit (head-angle) 0.2))
+            '(j-speed! (j :right 0) (min-abs-limit (head-angle) 0.2))]
+       }
       }
      }
     }
@@ -223,9 +305,11 @@
 
 (defn make-food
   "Creates and returns a food particle.
-   :user-data of the fixture is a map `{:is-food? true}`"
+   :user-data of the fixture is a map `{:is-food? true}`
+   :user-data of the body is also a map `{:is-food? true}"
   [position]
-  (body! {:position position}
+  (body! {:position position
+          :user-data {:is-food? true}}
          {:shape (polygon [[0 0.6] [-0.25 0] [0.25 0]])
           :restitution 0 :friction 0.8
           :user-data {:is-food? true}}))
@@ -245,7 +329,7 @@
                      :group-index group-index})
         jt-opts {:enable-motor true
                  :motor-speed 0
-                 :max-motor-torque 1000}
+                 :max-motor-torque 500}
         j0 (revolute-joint! body thigh at
                             jt-opts)
         j1 (revolute-joint! thigh calf at-knee
@@ -274,6 +358,9 @@
                          (make-food [x 0.6])))
         ped (make-2ped [0 3] -2)]
     (alter-var-root (var *it*) (fn [_] ped))
+    (reset! energy 1000)
+    (reset! pos-history (vector-of :float))
+    (reset! foodlist allfood)
     (reset! ground-body ground)))
 
 (defn draw-info-text []
@@ -283,7 +370,7 @@
         fmt-ang (fn [x] (str (fmt (/ x PI)) "pi"))
         j-info (fn [j nm]
                  (str nm
-                      ": angle = " (fmt-ang (joint-angle j))
+                      ": angle = " (fmt-ang (in-pi-pi (joint-angle j)))
                       ", motor " (if (motor-enabled? j) "on" "off")
                       ", mspeed = " (fmt-ang (motor-speed j))
                       ", mtorque = " (fmt (motor-torque j))))]
@@ -293,7 +380,14 @@
                     (j-info l1 "l1") "\n"
                     (j-info r0 "r0") "\n"
                     (j-info r1 "r1"))
-               10 10)))
+               10 10))
+  ;; draw energy reserves as bar
+  (quil/rect-mode :corner)
+  (quil/fill (quil/color 128 128 128))
+  (quil/rect (- (quil/width) 10) 0 10 (quil/height))
+  (quil/fill (quil/color 128 255 128))
+  (quil/rect (- (quil/width) 10) 0 10 (* (quil/height)
+                                         (/ @energy 1000))))
 
 (defn my-key-press []
   (let [{{[l0 l1] :joints} :left
@@ -319,12 +413,29 @@
       (key-press))))
 
 (defn my-step []
+  ;; TODO: we need to know the time step to look this up!
+  (when-let [x (first (position (:head *it*)))]
+    (swap! pos-history conj x))
+  ;; Work(joules) = torque * rotation-angle
+  ;; note joules/seconds = watts
+  (let [each-power (map power-watts (j))
+        dt (/ 1 30.0)
+        joules (* (reduce + each-power) dt)]
+    (swap! energy - joules))
   (let [path (decide! first-basic-scheme)]
-    (when-not (= path @current-decision-path)
-      (println "new decision: " path)
-      (reset! current-decision-path path)
-      (reset! entered-decision @world-time))
-    ))
+    (when-not (= path @last-decisions)
+      (println (format "%.2f" @world-time)
+               "new decision: " path)
+      (let [n-same (count (take-while true? (map = path @last-decisions)))
+            n-more (- (count path) n-same)]
+        (reset! last-decisions path)
+        (swap! entered-decisions
+               (fn [this] (concat (take n-same this)
+                                  (repeat n-more @world-time))))
+        (println "n-same" n-same "n-more" n-more "entered decisions" @entered-decisions))))
+  (doseq [other (contacting (:head *it*))]
+    (when (:is-food? (user-data other))
+      (destroy! other))))
 
 (defn setup []
   (setup-world!)
