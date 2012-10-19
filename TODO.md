@@ -1,12 +1,13 @@
 
 * creature movement strategies
   * debug/insight:
-    * print sequence of tests and results when decision changes (DONE)
     * press \? to show API state
+    * count how often and for how long each operator is active
   * decision tree (DONE)
     * effects at each node, not just leaves
-  * maybe better: sets of conditions triggering "productions"
-    * like SOAR
+    * abandoned in favour of:
+  * sets of conditions proposing operators (like SOAR)
+    * DONE
 
 * energy
   * food particles
@@ -21,7 +22,7 @@
     * reproductive success
     * energy in egg gives starting reserve for offspring
     * egg sits for a time (vulnerable) before hatching
-  * account for damage to head
+  * account for damage to head *********
     * as energy loss?
 
 * creature senses
@@ -39,7 +40,8 @@
 * evolution
   * crossover and mutation
     * mutation rules evolve?
-  * competing individuals, or independent (islands)?
+  * some balance of competing individuals, or independent (islands)
+    * predation!
 
 * initially just one body structure
 * other body structures?

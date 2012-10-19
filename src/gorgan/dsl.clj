@@ -7,8 +7,22 @@
                             energy-in-eggs
                             pos-history
                             energy-history
-                            energy-eaten-history]])
+                            energy-eaten-history
+                            proposals
+                            operator-chosen-at]])
   (:require [gorgan.history-queues :as hq]))
+
+;; proposals-scheme specific stuff
+
+(defn propose
+  [op-name priority]
+  (swap! proposals #(merge-with max % %2)
+         {op-name priority}))
+
+(defmacro when-all
+  [conds & body]
+  `(when (every? boolean ~conds)
+     ~@body))
 
 ;; tree-scheme specific stuff
 
@@ -121,19 +135,8 @@
   (angle (:head *it*)))
 
 (defn time-in-state
- "Time since last deviation from the current node in the movement
-  scheme tree. Depends on (and detects) the node from which it was
-  called. Note that the final decision node may change without
-  deviation from an intermediate decision node. Consequently the
-  top-level node can never be deviated from, and its time-in-state is
-  never reset."
- []
- (if (empty? *decision-path*)
-   @world-time
-   (let [depth (count *decision-path*)]
-     (if (= *decision-path* (take depth @last-decisions))
-       (- @world-time (nth @entered-decisions (dec depth)))
-       0.0))))
+  []
+  (- @world-time @operator-chosen-at))
 
 (defn food-within
   "Counts food particles within given distance left or right.
@@ -168,6 +171,12 @@
   ([side index]
      (nth (j side) index)))
 
+(defn j-level
+  "selects joints at a given level out from head, starting at 0 for
+   head-attached joints."
+  [index]
+  [(j :left index)
+   (j :right index)])
 
 ;; queries on collections of joints: should we
 ;;   a) not allow
@@ -238,7 +247,7 @@
    attached outer body)"
   [jt ang speed-factor]
   (if (coll? jt)
-    (dorun (map #(j-world-angle! % ang) jt))
+    (dorun (map #(j-world-angle! % ang speed-factor) jt))
     (do
       (enable-motor! jt true)
       (let [ang-diff (in-pi-pi (- ang (angle (body-b jt))))]

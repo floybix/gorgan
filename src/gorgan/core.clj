@@ -27,6 +27,16 @@
 
 (def ^:dynamic *debug* true)
 
+;; proposals scheme state
+
+(def last-operator (atom nil))
+(def prev-operator (atom nil))
+(def last-priority (atom 0))
+(def operator-chosen-at (atom 0))
+(def operator-durations (atom {}))
+(def proposals (atom {}))
+
+
 (defn make-food
   "Creates and returns a food particle.
    :user-data of the fixture is a map `{:is-food? true}`
@@ -63,7 +73,8 @@
 
 (defn make-2ped
   [position group-index]
-  (let [head (body! {:position position}
+  (let [head (body! {:position position
+                     :fixed-rotation true}
                     {:shape (circle 1)
                      :group-index group-index})
         rleg (make-leg head :top-right group-index)
@@ -75,7 +86,10 @@
     (reset! info-text
             (str "energy: 300 - " (fmt @energy-moving)
                  " + " (fmt @energy-eaten)
-                 " = " (fmt @energy) "\n")))
+                 " = " (fmt @energy) "\n"
+                 "operator: " @last-operator
+                 " (" @last-priority ")" "\n"
+                 "previous: " @prev-operator "\n")))
   ;; draw energy reserves as bar
   (quil/rect-mode :corner)
   (quil/fill (quil/color 128 128 128))
@@ -84,7 +98,10 @@
   (quil/rect (- (quil/width) 10) 0 10 (* (quil/height)
                                          (/ @energy 1000))))
 
-(defn core-step []
+(defn core-step
+  "Performs energy accounting.
+   Returns false if energy balance has fallen to zero."
+  []
   (hq/history-queue-step! pos-history (position (:head *it*)))
   (hq/history-queue-step! energy-history @energy)
   (hq/history-queue-step! energy-eaten-history @energy-eaten)
@@ -100,4 +117,5 @@
     (when (:is-food? info)
       (swap! energy + (:joules info))
       (swap! energy-eaten + (:joules info))
-      (destroy! other))))
+      (destroy! other)))
+  (pos? @energy))

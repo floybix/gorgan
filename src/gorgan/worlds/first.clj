@@ -1,7 +1,7 @@
 (ns gorgan.worlds.first
   (:use [cljbox2d core joints testbed]
         [gorgan core])
-  (:require [gorgan.tree-scheme :as tsch]
+  (:require [gorgan.proposals-scheme :as psch]
             [gorgan.history-queues :as hq]
             [quil.core :as quil]))
 
@@ -35,7 +35,7 @@
                          (make-food [x 12] 100)))
         ped (make-2ped [0 3] -2)]
     (alter-var-root (var *it*) (fn [_] ped))
-    (alter-var-root (var tsch/*scheme*) (fn [_] tsch/first-basic-scheme))
+    (alter-var-root (var psch/*scheme*) (fn [_] psch/first-scheme))
     (reset! energy 300)
     (reset! energy-moving 0)
     (reset! energy-eaten 0)
@@ -49,7 +49,7 @@
 (defn setup []
   (quil/frame-rate (/ 1 *timestep*))
   (setup-world!)
-  (reset! step-fn tsch/step)
+  (reset! step-fn psch/step)
   (reset! draw-more-fn draw-more))
 
 (defn -main
